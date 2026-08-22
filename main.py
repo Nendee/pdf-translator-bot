@@ -87,12 +87,18 @@ def get_lang_keyboard():
 async def process_pdf_in_place(input_path: str, output_path: str, target_lang_name: str, target_lang_code: str):
     doc = fitz.open(input_path)
     
+    # Считываем шрифт в байтовый буфер для корректной передачи в PyMuPDF
+    with open(FONT_PATH, "rb") as f:
+        font_bytes = f.read()
+
     for page in doc:
-        page.insert_font(fontname="DejaVu", fontfile=FONT_PATH)
+        # Регистрируем шрифт через fontbuffer
+        page.insert_font(fontname="DejaVu", fontbuffer=font_bytes)
+        
         blocks = page.get_text("blocks")
         
         for block in blocks:
-            # Игнорируем блоки-картинки (тип 1)
+            # Игнорируем картинки и бинарные блоки (тип 0 - текст)
             if block[6] != 0:
                 continue
 
@@ -108,7 +114,7 @@ async def process_pdf_in_place(input_path: str, output_path: str, target_lang_na
             page.add_redact_annot(rect, fill=(1, 1, 1))
             page.apply_redactions()
 
-            # Записываем переведенный текст поверх
+            # Записываем переведённый текст поверх
             page.insert_textbox(
                 rect, 
                 translated, 
@@ -117,8 +123,7 @@ async def process_pdf_in_place(input_path: str, output_path: str, target_lang_na
                 color=(0, 0, 0)
             )
             
-            # Небольшая задержка для избежания бана API
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.05)
 
     doc.save(output_path, garbage=4, deflate=True)
     doc.close()
@@ -181,12 +186,4 @@ async def handle_document(message: types.Message, state: FSMContext):
             os.remove(output_pdf)
         
         await state.set_state(TranslateState.waiting_for_lang)
-        await message.answer("Хочешь перевести ещё один файл? Выбери язык:", reply_markup=get_lang_keyboard())
-
-async def main():
-    await bot.delete_webhook(drop_pending_updates=True)
-    print("[INFO] Бот успешно запущен...")
-    await dp.start_polling(bot)
-
-if __name__ == "__main__":
-    asyncio.run(main())
+        await message.answer("Хочешь перевести ещё один файл? Выбери
