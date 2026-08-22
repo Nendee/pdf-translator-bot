@@ -1,5 +1,7 @@
 import os
 import asyncio
+import fitz  # PyMuPDF
+from xhtml2pdf import pisa
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -7,13 +9,11 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from google import genai
 from deep_translator import GoogleTranslator
-import pypdf
-from fpdf import FPDF
 
 # --- НАСТРОЙКИ ---
-BOT_TOKEN = "8841505744:AAE410CMsOjBneT3uP6XGuJ_vgfjk60I_Lk"
+BOT_TOKEN = "ВАШ_BOT_TOKEN"
 GEMINI_KEYS = [
-    "AQ.Ab8RN6JBEgZq9YGr8Q0RD2AmT07C5YrOfZWRdsBDxSE5b-vixw",
+    "ВАШ_GEMINI_KEY",
 ]
 
 # --- СОСТОЯНИЯ (FSM) ---
@@ -21,20 +21,21 @@ class TranslateState(StatesGroup):
     waiting_for_lang = State()
     waiting_for_file = State()
 
-# --- КАCКАДНЫЙ ПЕРЕВОДЧИК ---
+# --- КАCКАДНЫЙ ПЕРЕВОДЧИК С СОХРАНЕНИЕМ РАЗМЕТКИ ---
 class CascadingTranslator:
     def __init__(self, gemini_keys: list[str]):
         self.gemini_clients = [genai.Client(api_key=key) for key in gemini_keys]
 
-    async def translate(self, text: str, target_lang_name: str, target_lang_code: str) -> str:
-        # Промпт принудительно заставляет переводить абсолютно весь текст
+    async def translate_html(self, html_content: str, target_lang_name: str, target_lang_code: str) -> str:
         prompt = (
-            f"Переведи весь следующий текст полностью на {target_lang_name} язык. "
-            f"Если в тексте встречаются разные языки (например, смесь английского и русского), всё равно переведи КАЖДОЕ слово и предложение на {target_lang_name}. "
-            f"Сохраняй исходную структуру и форматирование абзацев:\n\n{text}"
+            f"Переведи весь текст в данном HTML-коде на {target_lang_name} язык.\n"
+            f"КРИТИЧЕСКИ ВАЖНО: Сохраняй абсолютно все HTML-теги, структуры таблиц, стили, форматирование и блоки нетронутыми!\n"
+            f"Переводи ТОЛЬКО отображаемый текст внутри тегов.\n"
+            f"Не добавляй никакие пояснения от себя, верни ТОЛЬКО готовый HTML-код.\n\n"
+            f"{html_content}"
         )
-        
-        # 1. Пробуем ключи Gemini
+
+        # 1. Gemini
         for i, client in enumerate(self.gemini_clients):
             try:
                 response = client.models.generate_content(
@@ -42,21 +43,23 @@ class CascadingTranslator:
                     contents=prompt
                 )
                 if response.text:
-                    return response.text
+                    # Очистка от markdown-оберток ```html ... ```
+                    cleaned = response.text.strip()
+                    if cleaned.startswith("```html"):
+                        cleaned = cleaned[7:]
+                    if cleaned.startswith("```"):
+                        cleaned = cleaned[3:]
+                    if cleaned.endswith("```"):
+                        cleaned = cleaned[:-3]
+                    return cleaned.strip()
             except Exception as e:
-                print(f"[Предупреждение] Gemini ключ #{i+1} ошибка/лимит: {e}")
+                print(f"[Предупреждение] Gemini ключ #{i+1} ошибка: {e}")
                 continue
 
-        # 2. Резервный переводчик (Google Translate fallback)
+        # 2. Резервный переводчик (Google Translate)
         print("[Инфо] Переключение на Google Translate...")
-        google_translator = GoogleTranslator(source='auto', target=target_lang_code)
-        chunks = [text[i:i+4000] for i in range(0, len(text), 4000)]
-        translated_chunks = []
-        for chunk in chunks:
-            translated = google_translator.translate(chunk)
-            translated_chunks.append(translated)
-            await asyncio.sleep(0.5)
-        return "\n".join(translated_chunks)
+        translator = GoogleTranslator(source='auto', target=target_lang_code)
+        return translator.translate(html_content)
 
 translator = CascadingTranslator(GEMINI_KEYS)
 bot = Bot(token=BOT_TOKEN)
@@ -76,26 +79,29 @@ def get_lang_keyboard():
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
-def extract_text_from_pdf(file_path: str) -> str:
-    reader = pypdf.PdfReader(file_path)
-    text = ""
-    for page in reader.pages:
-        extracted = page.extract_text()
-        if extracted:
-            text += extracted + "\n"
-    return text
+# --- ФУНКЦИИ ОБРАБОТКИ PDF И HTML ---
+def pdf_to_html(input_path: str) -> str:
+    """Извлекает макет PDF с сохранением HTML-тегов и стилей"""
+    doc = fitz.open(input_path)
+    full_html = "<html><head><meta charset='utf-8'></head><body>"
+    
+    for page in doc:
+        full_html += page.get_text("html")
+        full_html += "<br style='page-break-after:always;' />"
+        
+    full_html += "</body></html>"
+    return full_html
 
-def create_pdf(text: str, output_path: str):
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.add_font('DejaVu', '', 'DejaVuSans.ttf', uni=True)
-    pdf.set_font('DejaVu', size=11)
-    clean_text = text.encode('utf-8', 'replace').decode('utf-8')
-    pdf.multi_cell(0, 8, txt=clean_text)
-    pdf.output(output_path)
+def html_to_pdf(html_content: str, output_path: str):
+    """Генерирует PDF-файл из HTML полностью средствам Python (xhtml2pdf)"""
+    with open(output_path, "wb") as pdf_file:
+        pisa.CreatePDF(
+            src=html_content, 
+            dest=pdf_file, 
+            encoding='utf-8'
+        )
 
-# --- ОБРАБОТЧИКИ СООБЩЕНИЙ С ИНТЕРАКТИВОМ ---
+# --- ОБРАБОТЧИКИ СООБЩЕНИЙ ---
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message, state: FSMContext):
     await state.set_state(TranslateState.waiting_for_lang)
@@ -111,7 +117,7 @@ async def set_language(call: types.CallbackQuery, state: FSMContext):
     await state.set_state(TranslateState.waiting_for_file)
     
     await call.message.edit_text(
-        f"Отлично! Выбран язык перевода: **{lang_name.capitalize()}**.\n\nТеперь отправь мне PDF-файл.",
+        f"Выбран язык перевода: **{lang_name.capitalize()}**.\n\nОтправь мне PDF-файл!",
         parse_mode="Markdown"
     )
     await call.answer()
@@ -126,7 +132,7 @@ async def handle_document(message: types.Message, state: FSMContext):
     lang_name = data.get("target_lang_name", "русский")
     lang_code = data.get("target_lang_code", "ru")
 
-    status_msg = await message.answer("Файл получен, начинаю обработку...")
+    status_msg = await message.answer("📥 Файл получен, извлекаю макет...")
     input_pdf = f"input_{message.from_user.id}.pdf"
     output_pdf = f"translated_{message.from_user.id}.pdf"
 
@@ -134,33 +140,35 @@ async def handle_document(message: types.Message, state: FSMContext):
         file_info = await bot.get_file(message.document.file_id)
         await bot.download_file(file_info.file_path, input_pdf)
         
-        await status_msg.edit_text("Извлекаю текст и перевожу...")
-        text = extract_text_from_pdf(input_pdf)
+        await status_msg.edit_text("🔄 Перевожу документ с сохранением структуры...")
         
-        if not text.strip():
-            await status_msg.edit_text("Не удалось прочитать текст из PDF (возможно, это сканированные картинки).")
-            return
+        # 1. Превращаем PDF в HTML
+        html_data = pdf_to_html(input_pdf)
+        
+        # 2. Переводим текст внутри HTML-тегов
+        translated_html = await translator.translate_html(html_data, lang_name, lang_code)
 
-        translated_text = await translator.translate(text, lang_name, lang_code)
-
-        await status_msg.edit_text("Генерирую новый PDF...")
-        create_pdf(translated_text, output_pdf)
+        await status_msg.edit_text("⚙️ Собираю итоговый PDF...")
+        
+        # 3. Собираем переведенный PDF
+        html_to_pdf(translated_html, output_pdf)
 
         doc_file = types.FSInputFile(output_pdf)
-        await message.answer_document(doc_file, caption=f"Готово! Переведено на {lang_name} язык.")
+        await message.answer_document(doc_file, caption=f"✅ Готово! Документ переведен на {lang_name} язык.")
         await status_msg.delete()
 
     except Exception as e:
-        await status_msg.edit_text(f"Произошла ошибка при обработке: {e}")
+        await status_msg.edit_text(f"❌ Произошла ошибка при обработке: {e}")
     
     finally:
         if os.path.exists(input_pdf): os.remove(input_pdf)
         if os.path.exists(output_pdf): os.remove(output_pdf)
-        # Возвращаем меню выбора языка для следующего документа
+        
+        # Сброс состояния для выбора следующего языка
         await state.set_state(TranslateState.waiting_for_lang)
         await message.answer("Хочешь перевести ещё один файл? Выбери язык:", reply_markup=get_lang_keyboard())
 
-# Резервный обработчик, если пользователь скинул файл без выбора языка
+# Резервный обработчик, если файл отправлен без выбора языка
 @dp.message(F.document)
 async def no_lang_selected(message: types.Message, state: FSMContext):
     await state.set_state(TranslateState.waiting_for_lang)
