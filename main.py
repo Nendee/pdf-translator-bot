@@ -2,8 +2,8 @@ import os
 import gc
 import asyncio
 import urllib.request
-import fitz  # PyMuPDF
-import google.generativeai as genai
+import pymupdf as fitz  # Используем новый импорт PyMuPDF без предупреждений
+from google import genai
 from deep_translator import GoogleTranslator
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
@@ -15,8 +15,8 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8841505744:AAE410CMsOjBneT3uP6XGuJ_vgfjk60I_Lk")
 GEMINI_KEY = os.getenv("GEMINI_KEY", "AQ.Ab8RN6JBEgZq9YGr8Q0RD2AmT07C5YrOfZWRdsBDxSE5b-vixw")
 
-if GEMINI_KEY:
-    genai.configure(api_key=GEMINI_KEY)
+# Инициализация нового клиента Gemini
+client = genai.Client(api_key=GEMINI_KEY) if GEMINI_KEY else None
 
 FONT_PATH = "DejaVuSans.ttf"
 
@@ -47,22 +47,28 @@ class CascadingTranslator:
             f"{combined_text}"
         )
 
-        try:
-            model = genai.GenerativeModel('gemini-1.5-flash')
-            response = await asyncio.to_thread(model.generate_content, prompt)
-            if response and response.text:
-                cleaned = response.text.strip()
-                if cleaned.startswith("```"):
-                    cleaned = cleaned.split("\n", 1)[-1]
-                if cleaned.endswith("```"):
-                    cleaned = cleaned.rsplit("```", 1)[0]
-                
-                result_blocks = cleaned.strip().split("---BLOCK_DELIMITER---")
-                if len(result_blocks) == len(texts):
-                    return [b.strip() for b in result_blocks]
-        except Exception as e:
-            print(f"[Предупреждение] Ошибка Gemini: {e}")
+        # 1. Перевод через Gemini (новый SDK)
+        if client:
+            try:
+                response = await asyncio.to_thread(
+                    client.models.generate_content,
+                    model='gemini-2.5-flash',
+                    contents=prompt
+                )
+                if response and response.text:
+                    cleaned = response.text.strip()
+                    if cleaned.startswith("```"):
+                        cleaned = cleaned.split("\n", 1)[-1]
+                    if cleaned.endswith("```"):
+                        cleaned = cleaned.rsplit("```", 1)[0]
+                    
+                    result_blocks = cleaned.strip().split("---BLOCK_DELIMITER---")
+                    if len(result_blocks) == len(texts):
+                        return [b.strip() for b in result_blocks]
+            except Exception as e:
+                print(f"[Предупреждение] Ошибка Gemini: {e}")
 
+        # 2. Резервный перевод через GoogleTranslator
         translated_list = []
         try:
             translator = GoogleTranslator(source='auto', target=target_lang_code)
@@ -111,7 +117,7 @@ async def process_pdf_in_place(input_path: str, output_path: str, target_lang_na
         texts_to_translate = []
         
         for block in blocks:
-            if block[6] == 0:
+            if block[6] == 0:  # Текстовый блок
                 text = block[4].strip()
                 if text:
                     valid_blocks.append(block)
