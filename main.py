@@ -2,7 +2,7 @@ import os
 import gc
 import asyncio
 import urllib.request
-import pymupdf as fitz  # Используем новый импорт PyMuPDF без предупреждений
+import pymupdf as fitz
 from google import genai
 from deep_translator import GoogleTranslator
 from aiogram import Bot, Dispatcher, F, types
@@ -15,7 +15,7 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8841505744:AAE410CMsOjBneT3uP6XGuJ_vgfjk60I_Lk")
 GEMINI_KEY = os.getenv("GEMINI_KEY", "AQ.Ab8RN6JBEgZq9YGr8Q0RD2AmT07C5YrOfZWRdsBDxSE5b-vixw")
 
-# Инициализация нового клиента Gemini
+# Инициализация Gemini
 client = genai.Client(api_key=GEMINI_KEY) if GEMINI_KEY else None
 
 FONT_PATH = "DejaVuSans.ttf"
@@ -47,7 +47,7 @@ class CascadingTranslator:
             f"{combined_text}"
         )
 
-        # 1. Перевод через Gemini (новый SDK)
+        # 1. Перевод через Gemini
         if client:
             try:
                 response = await asyncio.to_thread(
@@ -104,13 +104,12 @@ def get_lang_keyboard():
 
 # --- ОБРАБОТКА PDF C СОХРАНЕНИЕМ КАРТИНОК ---
 async def process_pdf_in_place(input_path: str, output_path: str, target_lang_name: str, target_lang_code: str):
+    ensure_font_exists()
     doc = fitz.open(input_path)
-    
-    with open(FONT_PATH, "rb") as f:
-        font_bytes = f.read()
 
     for page in doc:
-        page.insert_font(fontname="DejaVu", fontbuffer=font_bytes)
+        # Регистрируем шрифт через прямую ссылку на файл
+        page.insert_font(fontname="DejaVu", fontfile=FONT_PATH)
         blocks = page.get_text("blocks")
         
         valid_blocks = []
