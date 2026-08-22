@@ -1,26 +1,30 @@
 import os
+import gc
 import asyncio
 import urllib.request
 import fitz  # PyMuPDF
+import google.generativeai as genai
+from deep_translator import GoogleTranslator
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from google import genai
-from deep_translator import GoogleTranslator
 
 # --- НАСТРОЙКИ ---
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8841505744:AAE410CMsOjBneT3uP6XGuJ_vgfjk60I_Lk")
-GEMINI_KEYS = [
-    os.getenv("GEMINI_KEY", "AQ.Ab8RN6JBEgZq9YGr8Q0RD2AmT07C5YrOfZWRdsBDxSE5b-vixw"),
-]
+GEMINI_KEY = os.getenv("GEMINI_KEY", "AQ.Ab8RN6JBEgZq9YGr8Q0RD2AmT07C5YrOfZWRdsBDxSE5b-vixw")
+
+if GEMINI_KEY:
+    genai.configure(api_key=GEMINI_KEY)
 
 FONT_PATH = "DejaVuSans.ttf"
-if not os.path.exists(FONT_PATH):
-    print("[INFO] Скачивание шрифта DejaVuSans...")
-    font_url = "https://github.com/dejavu-fonts/dejavu-fonts/raw/master/ttf/DejaVuSans.ttf"
-    urllib.request.urlretrieve(font_url, FONT_PATH)
+
+def ensure_font_exists():
+    if not os.path.exists(FONT_PATH):
+        print("[INFO] Скачивание шрифта DejaVuSans...")
+        font_url = "https://github.com/dejavu-fonts/dejavu-fonts/raw/master/ttf/DejaVuSans.ttf"
+        urllib.request.urlretrieve(font_url, FONT_PATH)
 
 # --- СОСТОЯНИЯ (FSM) ---
 class TranslateState(StatesGroup):
@@ -29,43 +33,52 @@ class TranslateState(StatesGroup):
 
 # --- КАСКАДНЫЙ ПЕРЕВОДЧИК ---
 class CascadingTranslator:
-    def __init__(self, gemini_keys: list[str]):
-        self.gemini_clients = [genai.Client(api_key=key) for key in gemini_keys if key]
-
-    async def translate_text(self, text: str, target_lang_name: str, target_lang_code: str) -> str:
-        if not text.strip():
-            return ""
+    async def translate_batch(self, texts: list[str], target_lang_name: str, target_lang_code: str) -> list[str]:
+        if not texts:
+            return []
             
+        separator = "\n---BLOCK_DELIMITER---\n"
+        combined_text = separator.join(texts)
+        
         prompt = (
-            f"Переведи этот фрагмент текста на {target_lang_name} язык.\n"
-            f"Сохраняй исходный смысл. Не добавляй никаких пояснений, отформатируй только перевод:\n\n{text}"
+            f"Переведи следующие фрагменты текста на {target_lang_name} язык.\n"
+            f"КРИТИЧЕСКИ ВАЖНО: Разделяй фрагменты ровно такой же строкой-разделителем: '---BLOCK_DELIMITER---'.\n"
+            f"Не изменяй количество фрагментов и не добавляй от себя никакого текста:\n\n"
+            f"{combined_text}"
         )
 
-        for i, client in enumerate(self.gemini_clients):
-            try:
-                response = client.models.generate_content(
-                    model='gemini-2.5-flash',
-                    contents=prompt
-                )
-                if response.text:
-                    cleaned = response.text.strip()
-                    if cleaned.startswith("```"):
-                        cleaned = cleaned.split("\n", 1)[-1]
-                    if cleaned.endswith("```"):
-                        cleaned = cleaned.rsplit("```", 1)[0]
-                    return cleaned.strip()
-            except Exception as e:
-                print(f"[Предупреждение] Gemini ключ #{i+1} ошибка: {e}")
-                continue
+        try:
+            model = genai.GenerativeModel('gemini-1.5-flash')
+            response = await asyncio.to_thread(model.generate_content, prompt)
+            if response and response.text:
+                cleaned = response.text.strip()
+                if cleaned.startswith("```"):
+                    cleaned = cleaned.split("\n", 1)[-1]
+                if cleaned.endswith("```"):
+                    cleaned = cleaned.rsplit("```", 1)[0]
+                
+                result_blocks = cleaned.strip().split("---BLOCK_DELIMITER---")
+                if len(result_blocks) == len(texts):
+                    return [b.strip() for b in result_blocks]
+        except Exception as e:
+            print(f"[Предупреждение] Ошибка Gemini: {e}")
 
+        translated_list = []
         try:
             translator = GoogleTranslator(source='auto', target=target_lang_code)
-            return translator.translate(text)
+            for t in texts:
+                if t.strip():
+                    translated = await asyncio.to_thread(translator.translate, t)
+                    translated_list.append(translated)
+                else:
+                    translated_list.append("")
+                await asyncio.sleep(0.05)
+            return translated_list
         except Exception as e:
             print(f"[Ошибка] GoogleTranslator: {e}")
-            return text
+            return texts
 
-translator = CascadingTranslator(GEMINI_KEYS)
+translator = CascadingTranslator()
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
@@ -83,49 +96,49 @@ def get_lang_keyboard():
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-# --- ОБРАБОТКА PDF C СОХРАНЕНИЕМ КАРТИНОК И ВЕРСТКИ ---
+# --- ОБРАБОТКА PDF C СОХРАНЕНИЕМ КАРТИНОК ---
 async def process_pdf_in_place(input_path: str, output_path: str, target_lang_name: str, target_lang_code: str):
     doc = fitz.open(input_path)
     
-    # Считываем шрифт в байтовый буфер для корректной передачи в PyMuPDF
     with open(FONT_PATH, "rb") as f:
         font_bytes = f.read()
 
     for page in doc:
-        # Регистрируем шрифт через fontbuffer
         page.insert_font(fontname="DejaVu", fontbuffer=font_bytes)
-        
         blocks = page.get_text("blocks")
         
+        valid_blocks = []
+        texts_to_translate = []
+        
         for block in blocks:
-            # Игнорируем картинки и бинарные блоки (тип 0 - текст)
-            if block[6] != 0:
-                continue
+            if block[6] == 0:
+                text = block[4].strip()
+                if text:
+                    valid_blocks.append(block)
+                    texts_to_translate.append(text)
 
+        if not texts_to_translate:
+            continue
+
+        translated_texts = await translator.translate_batch(texts_to_translate, target_lang_name, target_lang_code)
+
+        for block, translated in zip(valid_blocks, translated_texts):
             rect = fitz.Rect(block[:4])
-            original_text = block[4].strip()
-
-            if not original_text:
-                continue
-
-            translated = await translator.translate_text(original_text, target_lang_name, target_lang_code)
-
-            # Перекрываем старый текст стиранием
+            
             page.add_redact_annot(rect, fill=(1, 1, 1))
-            page.apply_redactions()
+            page.apply_redactions(images=0)
 
-            # Записываем переведённый текст поверх
             page.insert_textbox(
                 rect, 
                 translated, 
                 fontname="DejaVu", 
-                fontsize=9,
+                fontsize=8,
                 color=(0, 0, 0)
             )
-            
-            await asyncio.sleep(0.05)
 
-    doc.save(output_path, garbage=4, deflate=True)
+        gc.collect()
+
+    doc.save(output_path, garbage=4, deflate=True, clean=True)
     doc.close()
 
 # --- ОБРАБОТЧИКИ СООБЩЕНИЙ ---
@@ -186,4 +199,21 @@ async def handle_document(message: types.Message, state: FSMContext):
             os.remove(output_pdf)
         
         await state.set_state(TranslateState.waiting_for_lang)
-        await message.answer("Хочешь перевести ещё один файл? Выбери
+        await message.answer("Хочешь перевести ещё один файл? Выбери язык:", reply_markup=get_lang_keyboard())
+
+@dp.message(F.document)
+async def no_lang_selected(message: types.Message, state: FSMContext):
+    await state.set_state(TranslateState.waiting_for_lang)
+    await message.answer(
+        "Сначала выбери язык, на который нужно перевести файл:",
+        reply_markup=get_lang_keyboard()
+    )
+
+async def main():
+    ensure_font_exists()
+    await bot.delete_webhook(drop_pending_updates=True)
+    print("[INFO] Бот успешно запущен...")
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
