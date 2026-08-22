@@ -1,5 +1,5 @@
-aiogram
+aiogram==3.30.0
 google-genai
+pymupdf
 deep-translator
-pypdf
-fpdf2
+xhtml2pdf
