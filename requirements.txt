@@ -1,0 +1,5 @@
+aiogram
+google-genai
+deep-translator
+pypdf
+fpdf2
