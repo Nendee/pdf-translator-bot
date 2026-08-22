@@ -3,3 +3,4 @@ google-genai
 pymupdf
 deep-translator
 xhtml2pdf
+reportlab
