@@ -1,9 +1,12 @@
 import os
 import asyncio
+import urllib.request
 import fitz  # PyMuPDF
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -17,6 +20,15 @@ BOT_TOKEN = "8841505744:AAE410CMsOjBneT3uP6XGuJ_vgfjk60I_Lk"
 GEMINI_KEYS = [
     "AQ.Ab8RN6JBEgZq9YGr8Q0RD2AmT07C5YrOfZWRdsBDxSE5b-vixw",
 ]
+
+# --- НАСТРОЙКА КИРИЛЛИЧЕСКОГО ШРИФТА ДЛЯ REPORTLAB ---
+FONT_PATH = "DejaVuSans.ttf"
+if not os.path.exists(FONT_PATH):
+    print("[INFO] Скачивание шрифта DejaVuSans для поддержки кириллицы...")
+    font_url = "https://github.com/dejavu-fonts/dejavu-fonts/raw/master/ttf/DejaVuSans.ttf"
+    urllib.request.urlretrieve(font_url, FONT_PATH)
+
+pdfmetrics.registerFont(TTFont('DejaVuSans', FONT_PATH))
 
 # --- СОСТОЯНИЯ (FSM) ---
 class TranslateState(StatesGroup):
@@ -58,7 +70,7 @@ class CascadingTranslator:
         print("[Инфо] Переключение на Google Translate...")
         translator = GoogleTranslator(source='auto', target=target_lang_code)
         
-        chunks = [text[i:i+4000] for i in range(0, len(text), 4000)]
+        chunks = [text[i:i+3000] for i in range(0, len(text), 3000)]
         translated_chunks = []
         for chunk in chunks:
             translated = translator.translate(chunk)
@@ -94,7 +106,7 @@ def pdf_to_text(input_path: str) -> str:
     return full_text
 
 def text_to_pdf(text_content: str, output_path: str):
-    """Генерирует чистый и стабильный PDF-файл с помощью ReportLab"""
+    """Генерирует PDF-файл с поддержкой кириллицы через DejaVuSans"""
     doc = SimpleDocTemplate(
         output_path,
         pagesize=letter,
@@ -106,6 +118,7 @@ def text_to_pdf(text_content: str, output_path: str):
     normal_style = ParagraphStyle(
         'CustomNormal',
         parent=styles['Normal'],
+        fontName='DejaVuSans',
         fontSize=10,
         leading=14,
         spaceAfter=8
@@ -163,7 +176,7 @@ async def handle_document(message: types.Message, state: FSMContext):
         
         await status_msg.edit_text("🔄 Перевожу документ...")
         
-        # 1. Считываем текст
+        # 1. Извлекаем текст
         text_data = pdf_to_text(input_pdf)
         
         if not text_data.strip():
@@ -175,7 +188,7 @@ async def handle_document(message: types.Message, state: FSMContext):
 
         await status_msg.edit_text("⚙️ Собираю итоговый PDF-документ...")
         
-        # 3. Собираем переведенный PDF
+        # 3. Собираем PDF с кириллическим шрифтом
         text_to_pdf(translated_text, output_pdf)
 
         doc_file = types.FSInputFile(output_pdf)
@@ -192,11 +205,23 @@ async def handle_document(message: types.Message, state: FSMContext):
         if os.path.exists(output_pdf): 
             os.remove(output_pdf)
         
-        # Сброс состояния для выбора следующего языка
         await state.set_state(TranslateState.waiting_for_lang)
         await message.answer("Хочешь перевести ещё один файл? Выбери язык:", reply_markup=get_lang_keyboard())
 
-# Резервный обработчик, если файл отправлен без выбора языка
+# Резервный обработчик
 @dp.message(F.document)
 async def no_lang_selected(message: types.Message, state: FSMContext):
-    await state.set_state(TranslateState.waiting_
+    await state.set_state(TranslateState.waiting_for_lang)
+    await message.answer(
+        "Сначала выбери язык, на который нужно перевести файл:",
+        reply_markup=get_lang_keyboard()
+    )
+
+# --- ЗАПУСК ---
+async def main():
+    await bot.delete_webhook(drop_pending_updates=True)
+    print("[INFO] Бот успешно запущен...")
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
