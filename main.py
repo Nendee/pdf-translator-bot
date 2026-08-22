@@ -11,9 +11,9 @@ from google import genai
 from deep_translator import GoogleTranslator
 
 # --- НАСТРОЙКИ ---
-BOT_TOKEN = "ВАШ_BOT_TOKEN"
+BOT_TOKEN = "8841505744:AAE410CMsOjBneT3uP6XGuJ_vgfjk60I_Lk"
 GEMINI_KEYS = [
-    "ВАШ_GEMINI_KEY",
+    "AQ.Ab8RN6JBEgZq9YGr8Q0RD2AmT07C5YrOfZWRdsBDxSE5b-vixw",
 ]
 
 # --- СОСТОЯНИЯ (FSM) ---
