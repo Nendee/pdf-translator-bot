@@ -108,8 +108,8 @@ async def process_pdf_in_place(input_path: str, output_path: str, target_lang_na
     doc = fitz.open(input_path)
 
     for page in doc:
-        # Регистрируем шрифт через прямую ссылку на файл
-        page.insert_font(fontname="DejaVu", fontfile=FONT_PATH)
+        # Регистрируем шрифт на уровне страницы через прямой путь к файлу
+        font_ref = page.insert_font(fontname="DejaVu", fontfile=FONT_PATH)
         blocks = page.get_text("blocks")
         
         valid_blocks = []
@@ -133,10 +133,12 @@ async def process_pdf_in_place(input_path: str, output_path: str, target_lang_na
             page.add_redact_annot(rect, fill=(1, 1, 1))
             page.apply_redactions(images=0)
 
+            # Передаем fontfile напрямую в insert_textbox
             page.insert_textbox(
                 rect, 
                 translated, 
                 fontname="DejaVu", 
+                fontfile=FONT_PATH,
                 fontsize=8,
                 color=(0, 0, 0)
             )
